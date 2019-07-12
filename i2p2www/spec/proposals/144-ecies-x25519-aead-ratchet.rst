@@ -254,6 +254,62 @@ Crypto types 1-3 are reserved for ECIES-ECDH-AES-SessionTag, see proposal 145.
 
 
 
+Handshake Patterns
+------------------
+
+Handshakes similar to Noise handshake patterns: https://noiseprotocol.org/noise.html#handshake-patterns
+
+The following letter mapping is used:
+
+- i = one-time ephemeral key
+- e = reusable ephemeral key
+- s = static key
+- p = message payload
+
+One-time sessions
+`````````````````
+
+Similar to the Noise N pattern.
+
+.. raw:: html
+
+  {% highlight lang='dataspec' %}
+<- s
+  ...
+  i is p ->
+
+{% endhighlight %}
+
+Unbound sessions
+````````````````
+
+Similar to the Noise N pattern.
+
+.. raw:: html
+
+  {% highlight lang='dataspec' %}
+<- s
+  ...
+  i is e es p ->
+
+{% endhighlight %}
+
+Bound sessions
+``````````````
+
+Similar to the Noise IK pattern.
+
+.. raw:: html
+
+  {% highlight lang='dataspec' %}
+<- s
+  ...
+  i is e es s ss p ->
+  <- i si e ee s se p
+
+{% endhighlight %}
+
+
 Sessions
 --------
 
@@ -771,7 +827,7 @@ Ephemeral Key Section Decrypted data
 ````````````````````````````````````
 
 The Ephemeral Key section contains flags and a key.
-It is always 40 bytes.
+It is always 48 bytes.
 When used in the one-time message, the key is all zeroes.
 
 
@@ -781,14 +837,18 @@ When used in the one-time message, the key is all zeroes.
 
 flags :: 2 bytes
          bit order: 15 14 .. 3210
-         bit 0: 1 if ephemeral key is to be used, 0 if not
+         bit 0: 1 if ephemeral key is present, 0 if not
          bit 1: 1 if Static Key Section follows, 0 if not
-         bits 15-2: Unused, set to 0 for future compatibility
+         bit 2: 1 if New Session Reply, 0 if not
+         bits 15-3: Unused, set to 0 for future compatibility
   num :: Message number, 2 bytes
   unused :: 4 bytes
+  sessionID :: session/ephemeral key ID, 8 bytes.
+         Uniquely identifies the ephemeral key being used,
+         to process New Session Reply messages.
   key :: the originator's ephemeral key, 32 bytes.
-         All zeros if flags bit 0 is not set
-         Set to 0 for future compatibility
+         If bit 0 is set, reusable ephemeral key for the session.
+         If bit 0 is unset, all zeroes, no session.
 
 {% endhighlight %}
 
@@ -862,6 +922,11 @@ ACK Request Contents
 ~~~~~~~~~~~~~~~~~~~~
 
 Delivery instructions for the ack.
+
+New Session ACK Contents
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Bob's Destination hash. Alice uses to associate inbound session w/ existing outbound session
 
 
 Padding Contents
@@ -965,7 +1030,10 @@ KDF for Payload Section (with Alice static key)
   // apk was decrypted in Static Key Section
   apk = DERIVE_PUBLIC(ask)
 
+  // If unbound or bound session
   sharedSecret = DH(ask, bpk) = DH(bsk, apk)
+  // If one-time session
+  sharedSecret = k from Ephemeral Key Section
 
   // MixKey(DH())
   // ChaChaPoly parameters to encrypt/decrypt
@@ -1009,36 +1077,6 @@ KDF for Payload Section (without Alice static key)
 {% endhighlight %}
 
 
-KDF for Payload Section (one-time format)
-`````````````````````````````````````````
-
-.. raw:: html
-
-  {% highlight lang='text' %}
-// Bob's X25519 static keys
-  // bpk is published in leaseset
-  bsk = GENERATE_PRIVATE()
-  bpk = DERIVE_PUBLIC(bsk)
-
-  // Alice's X25519 ephemeral keys
-  // Alice's decoded one-time keys
-  ask = GENERATE_PRIVATE()
-  // Alice's decoded one-time public key
-  apk = DERIVE_PUBLIC(ask)
-
-  sharedSecret = DH(ask, bpk) = DH(bsk, apk)
-
-  // MixKey(DH())
-  // ChaChaPoly parameters to encrypt/decrypt
-  k = HKDF(INITIAL_ROOT_KEY, sharedSecret, "Part3OneTimeKeys", 64)
-  chainKey = keydata[0:31]
-  k = keydata[32:64]
-  n = 0
-  ad = SHA-256(apk)
-
-{% endhighlight %}
-
-
 
 
 Justification
@@ -1058,7 +1096,7 @@ Notes
 This allows sending multiple new session messages with the same initial ratchet key,
 which is more efficient, e.g. for a POST.
 These messages will have a different cleartext (new session) key but contain
-the same ratchet key inside the first AEAD block.
+the same ratchet root key inside the first AEAD block.
 New session keys are never reused.
 This prevents external observers from identifying a POST sequence through
 seeing duplicate cleartext keys. However, these messages may still be
@@ -1069,7 +1107,192 @@ be decrypted correctly.
 
 
 
-1g) Existing session format
+1g) New Session Reply format
+----------------------------
+
+Encrypted:
+
+.. raw:: html
+
+  {% highlight lang='dataspec' %}
++----+----+----+----+----+----+----+----+
+  |                                       |
+  +                                       +
+  |   New Session One Time Public Key     |
+  +                                       +
+  |                                       |
+  +                                       +
+  |                                       |
+  +----+----+----+----+----+----+----+----+
+  |                                       |
+  +        Ephemeral Key Section          +
+  |       ChaCha20 encrypted data         |
+  +            40 bytes                   +
+  |                                       |
+  +                                       +
+  |                                       |
+  +                                       +
+  |                                       |
+  +----+----+----+----+----+----+----+----+
+  |  Poly1305 Message Authentication Code |
+  +         (MAC) for above section       +
+  |             16 bytes                  |
+  +----+----+----+----+----+----+----+----+
+  |                                       |
+  +            Payload Section            +
+  |       ChaCha20 encrypted data         |
+  ~                                       ~
+  |                                       |
+  +                                       +
+  |                                       |
+  +----+----+----+----+----+----+----+----+
+  |  Poly1305 Message Authentication Code |
+  +         (MAC) for Payload Section     +
+  |             16 bytes                  |
+  +----+----+----+----+----+----+----+----+
+
+  Public Key :: 32 bytes, little endian, Elligator2, cleartext
+
+  Ephemeral Key Section encrypted data :: 40 bytes
+
+  Payload Section encrypted data :: remaining data minus 16 bytes
+
+  MAC :: Poly1305 message authentication code, 16 bytes
+
+{% endhighlight %}
+
+Decrypted:
+
+Ephemeral section is the same format as New Session message,
+and contains Bob's reusable ephemeral public key.
+
+Static section is the same format as New Session message,
+and contains Bob's static public key.
+
+Payload section must contain the following blocks (in order):
+
+- DateTime (0)
+- Options (5)
+
+Optional payload blocks
+
+- I2NP (3)
+- Padding (254)
+
+Optional blocks can have multiple I2NP blocks, but only a single padding block.
+If present, the padding block must be the final block.
+
+
+KDF for Ephemeral Key Section Encrypted Contents
+````````````````````````````````````````````````
+
+Same as Ephemeral Key Section in original New Session Message.
+Needs to be the same, because Alice will not know this is a reply
+until the Ephemeral Key Section is decrypted.
+
+.. raw:: html
+
+  {% highlight lang='text' %}
+// Alice's X25519 static keys
+  // apk is sent in original New Session message
+  ask = GENERATE_PRIVATE()
+  apk = DERIVE_PUBLIC(ask)
+
+  // Bob's X25519 one-time-use ephemeral keys
+  ibsk = GENERATE_PRIVATE_ELG2()
+  ibpk = DERIVE_PUBLIC(ibsk)
+  // ebpk is sent in cleartext in the
+  // beginning of the new session message
+  ebpk = ENCODE_ELG2(ibpk)
+  // As decoded by Bob
+  ibpk = DECODE_ELG2(ebpk)
+
+  // Must be the same as the original New Session message
+  // Alice doesn't know it's a reply yet
+  INITIAL_ROOT_KEY = SHA256("144-ECIES-X25519-AEAD-Ratchet")
+
+  sharedSecret = DH(ask, ibpk) = DH(ibsk, apk)
+
+  // MixKey(DH())
+  // ChaChaPoly parameters to encrypt/decrypt
+  keydata = HKDF(INITIAL_ROOT_KEY, sharedSecret, "NewSessionTmpKey", 64)
+  chainKey = keydata[0:31]
+  k = keydata[32:64]
+  n = 0
+  ad = SHA-256(ebpk)
+
+{% endhighlight %}
+
+
+
+KDF for Payload Section Encrypted Contents
+``````````````````````````````````````````
+
+.. raw:: html
+
+  {% highlight lang='text' %}
+// Bob's X25519 reusable ephemeral keys generated for the Ephemeral Key Section
+  rbsk = GENERATE_PRIVATE()
+  // rbpk decrypted by Alice in Ephemeral Key Section
+  rbpk = DERIVE_PUBLIC(rbsk)
+
+  // Alice's X25519 ephemeral keys from original New Session Message
+  rask = GENERATE_PRIVATE()
+  // rapk was decrypted in original New Session Ephemeral Key Section
+  rapk = DERIVE_PUBLIC(rask)
+
+  // MixKey(DH())
+  // ChaChaPoly parameters to encrypt/decrypt
+  // chainKey from original New Session Payload Section
+  sharedSecret = DH(rask, rbpk) = DH(rbsk, rapk)
+  keydata = HKDF(chainKey, sharedSecret, "EphemeralBinding", 32)
+  chainKey = keydata[0:31]
+
+  // Alice's X25519 static keys from original New Session Message
+  ask = GENERATE_PRIVATE()
+  // apk was decrypted in original New Session Static Key Section
+  apk = DERIVE_PUBLIC(ask)
+
+  sharedSecret = DH(ask, rbpk) = DH(rbsk, apk)
+  keydata = HKDF(chainKey, sharedSecret, "BoundReplyMixins", 64)
+  chainKey = keydata[0:31]
+  k = keydata[32:64]
+  n = 0
+  ad = SHA-256(rbpk)
+
+{% endhighlight %}
+
+Notes
+-----
+
+Bob must include a matching session/key ID in the reply Ephemeral Key Section for Alice to
+properly bind the reply inbound session with the original outbound session.
+
+If Alice's New Session (NS) message requires a reply, Bob will also send a NSR message for Alice's original inbound session.
+Multiple NSR messages may be sent in reply, each with unique ephemeral keys and session/key ID, depending on the size of the response.
+
+Alice and Bob are required to use new one-time ephemeral keys for every NS and NSR message.
+
+Alice must receive one of Bob's NSR messages before sending Existing Session (ES) messages,
+and Bob must receive an ES message from Alice before sending ES messages.
+
+Alice may also implement a Bloom filter using a hash of Bob's NSR messages to avoid replay attacks.
+Bloom filter specs TBD.
+
+The ``chainKey`` and ``k`` from Bob's NSR Payload Section are used
+as inputs for the initial ES DH Ratchets (both directions, see DH Ratchet KDF).
+
+Alice only creates new sessions for the first NSR received, the others
+can simply be processed, their hash added to the Bloom filter, and then can
+be discarded to save memory resources.
+
+Bob must only retain existing sessions for the ES message(s) received from Alice.
+Any other created inbound and outbound sessions (for multiple NSRs) should be
+destroyed immediately after receiving Alice's first ES message(s) for a given session.
+
+
+
+1h) Existing session format
 ---------------------------
 
 Session tag (8 bytes)
@@ -1322,7 +1545,9 @@ Issues
 
 Avoid using random nonces. If we do need random nonces,
 we may need a different AEAD with a larger nonce that's resistant to nonce reuse,
-so we can use random nonces. (SIV?)
+so we can use random nonces. ChaCha20 can be used as an CSPRNG to produce
+random 32-bit nonces. We can seed the CSPRNG with an extra 32-bit value derived
+in the DH Ratchet KDF.
 
 
 
@@ -1386,16 +1611,68 @@ To generate keys for both directions, you have to ratchet twice.
 You ratchet every time you generate and send a new key.
 You ratchet every time you receive a new key.
 
-Alice ratchets once when she initiates a new outbound session and creates the corresponding inbound session.
-Bob ratchets twice when he receives the inbound session and creates the corresponding outbound session,
-once for the new key received, and once for the new key generated.
-Alice ratchets once when she receives the new key on the inbound session and replaces the corresponding outbound session.
-So each side ratchets twice total, in the typical case.
+Alice ratchets once when creating an unbound outbound session, she does not create an inbound session
+(unbound is non-repliable).
 
-The frequency of ratchets after the initial handshake is implementation-dependent.
+Bob ratchets once when creating an unbound inbound session, and does not create a corresponding outbound session
+(unbound is non-repliable).
+
+Alice continues sending New Session (NS) messages to Bob until receiving one of Bob's New Session Reply (NSR) message(s).
+She then uses the NSR's Payload Section KDF results as inputs for the session ratchets (see DH Ratchet KDF),
+and begins sending Existing Session (ES) messages.
+
+For zero-RTT, Alice sends multiple NS messages to Bob.
+
+A full two-way handshake, similar to Noise IK pattern, is needed to avoid Key Compromise Impersonation (KCI) attacks.
+
+See the Noise "Payload Security Properties" table: https://noiseprotocol.org/noise.html#payload-security-properties
+For more information on KCI, see this Hlauschek paper from 2015: https://www.usenix.org/system/files/conference/woot15/woot15-paper-hlauschek.pdf
+
+For each NS message received, Bob creates a new inbound session, using the KDF results
+of his NSR Payload Section for inputs to the new inbound and outbound ES DH Ratchet.
+
+For each immediate reply required, Bob sends Alice a NSR message with the reply in the payload.
+It is required Bob use a new one-time and reusable ephemeral keys for every NSR.
+
+Bob must receive an ES message from Alice on one of the inbound sessions, before creating and sending
+ES messages on the corresponding outbound session.
+
+Alice should use a timer for receiving a NSR message from Bob. If the timer expires,
+the session should be removed, and optionally restarted.
+
+If the session is restarted, it is required to use new one-time and session ephemeral keys.
+
+To avoid a KCI and/or resource exhaustion attack, where an attacker drops Bob's NSR replies to keep Alice sending NS messages,
+Alice should avoid starting new sessions to Bob after a certain number of retries due to timer expiration.
+
+Alice calculates 6 ECDHs per-bound-session (minimum), 3 for each NS message(s) to Bob,
+and 3 for each of Bob's NSR message(s) (if the same one-time and reusable keys are used, and KDF results are cached).
+
+Bob also calculates 6 ECDHs per-bound-session, 3 for each of Alice's NS message(s), and 3 for each of his NSR message(s).
+
+Alice and Bob each do one DH ratchet to create the inbound and outbound Existing Session
+session tag and symmetric key ratchet chains, and once for every Next DH Key block received.
+
+Alice and Bob each do two session tag ratchets and two symmetric keys ratchets after each
+DH ratchet. For each new ES message in a given direction, Alice and Bob advance the session
+tag and symmtric key ratchets.
+
+The frequency of DH ratchets after the initial handshake is implementation-dependent.
 While the protocol places a limit of 65535 messages before a ratchet is required,
 more frequent ratcheting (based on message count, elapsed time, or both)
 may provide additional security.
+
+
+Issues
+``````
+
+After the final handshake KDF on bound sessions, Bob and Alice must run the Noise Split() function on the
+resulting CipherState to create independent symmetric and tag chain keys for inbound and outbound sessions.
+
+Failing to run Split() results in the same keys being used to send and receive messages in both directions.
+
+For ChaCha20-Poly1305, this could result in encrypting different messages using the same key and nonce,
+which breaks the cryptosystem.
 
 
 KDF
@@ -1408,67 +1685,75 @@ Inputs:
   1) Root key
   2) sharedSecret (the DH result from the new session message)
 
-  First time:
-  // Alice generates her first ephemeral DH key pair
-  // Alice's first ratchet X25519 ephemeral keys
-  rask = GENERATE_PRIVATE()
-  // rapk is sent encrypted in the new session message
-  rapk = DERIVE_PUBLIC(rask)
-
-  // Bob's X25519 static keys
-  // bpk is published in Bob's leaseset
-  bsk = GENERATE_PRIVATE()
-  bpk = DERIVE_PUBLIC(bsk)
-
-  INITIAL_ROOT_KEY = SHA256("144-ECIES-X25519-AEAD-Ratchet")
-
-  sharedSecret = DH(rask, bpk) = DH(bsk, rapk)
+  Received New Session message:
+  sharedSecret = k from Payload Section
+  rootKey = chainKey from Payload Section
 
   // KDF_RK(rk, dh_out)
-  keydata = HKDF(INITIAL_ROOT_KEY, sharedSecret, "KDFDHRatchetStep", 64)
-  // Output 1: The next Root Key (KDF input for the next ratchet)
-  nextRootKey = keydata[0:31]
-  // Output 2: The chain key to initialize the new
-  // session tag and symmetric key ratchets
-  // for Bob to Alice transmissions
-  ck = keydata[32:63]
-  keydata = HKDF(ck, ZEROLEN, "TagAndKeyGenKeys", 64)
-  sessTag_ck = keydata[0:31]
-  symmKey_ck = keydata[32:63]
+  keydata = HKDF(rootKey, sharedSecret, "KDFDHRatchetStep", 64)
 
+  // See New Session Reply KDF for generating Bob's reply message
+  // and first set of reusable ephemeral keys
 
-  Second time:
-  // Bob generates his first ephemeral DH key pair
-  // Alice's first ratchet X25519 ephemeral keys
-  rbsk = GENERATE_PRIVATE()
-  // rbpk is sent encrypted in the reply
+  Received Next DH Key block:
+  // Alice's generates new X25519 ephemeral keys
+  rask = GENERATE_PRIVATE()
+  rapk = DERIVE_PUBLIC(rask)
+  
+  rbsk = Bob's current reusable ephemeral private key
   rbpk = DERIVE_PUBLIC(rbsk)
-
-  // Alice's first ratchet X25519 ephemeral keys
-  // from new session message
-  rask = As generated for new session message
-  rapk = from new session message
 
   sharedSecret = DH(rask, rbpk) = DH(rbsk, rapk)
 
   // KDF_RK(rk, dh_out)
-  rootKey = nextRootKey
+  rootKey = nextRootKey from previous DH Ratchet
   keydata = HKDF(rootKey, sharedSecret, "KDFDHRatchetStep", 64)
+
+  For unidirectional (unbound) DH Ratchets
   // Output 1: The next Root Key (KDF input for the next ratchet)
   nextRootKey = keydata[0:31]
   // Output 2: The chain key to initialize the new
   // session tag and symmetric key ratchets
   // for Alice to Bob transmissions
   ck = keydata[32:63]
+  // Inbound session tag and symmetric key chain keys
   keydata = HKDF(ck, ZEROLEN, "TagAndKeyGenKeys", 64)
-  sessTag_ck = keydata[0:31]
-  symmKey_ck = keydata[32:63]
+  SessTag_ck = keydata[0:31]
+  SymmKey_ck = keydata[32:63]
+
+  For bidirectional (bound) DH Ratchets:
+  // Output 1: The next Root Key (KDF input for the next ratchet)
+  nextRootKey = keydata[0:31]
+  // Output 2: The chain key to initialize the new
+  // session tag and symmetric key ratchets
+  // for Alice to Bob transmissions
+  ck = keydata[32:63]
+  // Split()
+  // Needed to separate key states for inbound and outbound sessions
+  // Alice's outbound and Bob's inbound session tag and symmetric key chain keys
+  keydata = HKDF(ck, ZEROLEN, "TagAndKeyGenKeys", 64)
+  aToBSessTag_ck = keydata[0:31]
+  aToBSymmKey_ck = keydata[32:63]
+  // Alice's inbound and Bob's outbound session tag and symmetric key chain keys
+  keydata = HKDF(ck, ZEROLEN, "BtoAChainsTagSym", 64)
+  bToASessTag_ck = keydata[0:31]
+  bToASymmKey_ck = keydata[32:63]
 
 
 
 {% endhighlight %}
 
 
+Notes
+`````
+
+Bob may choose to rekey his ephemeral keys on receiving a Next DH Key block from Alice,
+but care must be taken to not cause an infinite rekeying loop. Should a flag be included
+in Next DH Key blocks for receiver rekey, or a timer be set from last rekey? TBD.
+
+On receiving a Next DH Key block on a bound session, the corresponding outbound session
+should be synchronized with the received ephemeral key, and a new ephemeral keypair
+(unless recently rekeyed).
 
 
 4b) Session Tag Ratchet
@@ -1691,7 +1976,20 @@ Other allowed blocks:
 - I2NP message (type 3)
 - Padding (type 254)
 
+In the new session reply message,
+the following blocks are required, in the following order:
+
+- DateTime (type 0)
+- Options (type 5)
+- New Session Ack (type 10)
+
+Other allowed blocks:
+
+- I2NP message (type 3)
+- Padding (type 254)
+
 No other blocks are allowed.
+Padding, if present, must be the last block.
 
 In the existing session message, order is unspecified, except for the
 following requirements:
@@ -2159,31 +2457,42 @@ Alice                           Bob
 
   any retransmissions, same as above
 
+  Alice can send subsequent Existing Session messages
+  immediately under the current outbound session.
+  However, she must wait for a New Session Reply (1g)
+  from Bob before processing any reply Existing Session
+  messages.
 
   following messages may arrive in any order:
 
-  <--------------     Existing Session
-                      with next key
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
                       with bundled HTTP reply part 1
 
-  <--------------     Existing Session
-                      with next key
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
                       with bundled HTTP reply part 2
 
-  <--------------     Existing Session
-                      with next key
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
                       with bundled HTTP reply part 3
 
   After reception of any of these messages,
   Alice switches to use existing session messages,
   and ratchets.
 
+  When Alice receives the New Session Reply, she sets
+  the current inbound session to expire, and creates
+  a new inbound + outbound session pair. The expiring
+  inbound session is kept to process any remaining
+  Existing Session messages from Bob.
+
 
   Existing Session     ------------------->
-  with next key
   with bundled streaming ack
-
-  after reception of this message, Bob ratchets
 
 
   Existing Session     ------------------->
@@ -2235,21 +2544,42 @@ Alice                           Bob
   New Session (1b)     ------------------->
   with static key for binding
   with next key
-  with bundled HTTP POST part 1
   with bundled LS
+  with bundled HTTP POST part 1
   without bundled Delivery Status Message
 
+  following messages can come in any order:
 
-  New Session (1b)     ------------------->
-  with static key for binding
-  with next key
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
+                      with bundled streaming ack
+
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
+                      with Delivery Status Message 1
+
+  After receiving the New Session Reply,
+  Alice sets the original inbound session to expire,
+  creates a new inbound and outbound session, and replaces
+  the original outbound session.
+  Alice can begin sending Existing Session messages.
+
+  If the Existing Session message arrives first, Alice
+  will send the next messages on the original outbound
+  session, meaning Bob must keep his expiring inbound
+  session for Alice around for a while.
+
+  following messages can come in any order:
+
+
+  Existing Session     ------------------->
   with bundled HTTP POST part 2
   with bundled LS
   without bundled Delivery Status Message
 
-
-  New Session (1b)     ------------------->
-  with static key for binding
+  Existing Session     ------------------->
   with next key
   with bundled HTTP POST part 3
   with bundled LS
@@ -2258,7 +2588,6 @@ Alice                           Bob
 
 
   <--------------     Existing Session
-                      with next key
                       with bundled streaming ack
 
   After reception of any of this message,
@@ -2275,7 +2604,6 @@ Alice                           Bob
   Existing Session     ------------------->
   with next key
   with bundled HTTP POST part 5
-
 
   <--------------     Existing Session
                       with bundled streaming ack
@@ -2306,22 +2634,41 @@ Alice                           Bob
   without bundled Delivery Status Message
 
 
-  <--------------     Existing Session
-                      with next key
-                      with bundled reply
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
+                      with bundled reply part 1
 
-  After reception of this message,
+  <--------------     New Session Reply (1g)
+                      with Bob's ephemeral and static key
+                      with Bob's Destination hash
+                      with bundled reply part 2
+
+  After reception of either message,
   Alice switches to use existing session messages,
   and ratchets.
+
+  If the Existing Session message arrives first,
+  Alice ratchets on the existing inbound and outbound
+  sessions.
+
+  When the New Session Reply arrives, Alice
+  sets the existing inbound session to expire,
+  creates a new inbound and outbound session,
+  and sends Existing Session messages on
+  the new outbound session.
+
+  Alice keeps the expiring inbound session
+  around for a while to process Bob's Existing Session
+  message sent to Alice's original inbound session.
+  If all expected original Existing Session message replies
+  have been processed, Alice can expire the original
+  inbound session immediately.
 
   if there are any other messages:
 
   Existing Session     ------------------->
-  with next key
   with bundled message
-
-  after reception of this message, Bob ratchets
-
 
   Existing Session     ------------------->
   with bundled streaming ack
