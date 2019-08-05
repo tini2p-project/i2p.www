@@ -3,9 +3,9 @@ ChaCha Tunnel Layer Encryption
 
 .. meta::
     :author: chisana
-    :created: 2019-07-27
-    :thread: http://doesnotexist.i2p
-    :lastupdated: 2019-08-04
+    :created: 2019-08-04
+    :thread: http://zzz.i2p/topics/2753
+    :lastupdated: 2019-08-05
     :status: Draft
 
 .. contents::
@@ -333,3 +333,9 @@ The padding oracle attacks against AES256/CBC won't work, because no padding is 
 changed to non-mod-16 lengths, AES256/CBC would still not be vulnerable due to rejected duplicate IVs.
 
 Both attacks are also blocked by disallowing multiple oracle calls using the same IV, since duplicate IVs are rejected.
+
+References
+==========
+
+.. [Tunnel-Implementation]
+   https://geti2p.net/en/docs/tunnels/implementation
