@@ -54,9 +54,6 @@ tunnel build options during the tunnel creation process.
 
 All gateways and tunnel participants will need to maintain a Bloom filter for validating the two independent nonces.
 
-The ``nonceKey`` mentioned throughout this proposal takes the place of the ``IVKey`` used in AES layer encryption.
-It is generated using the same KDF from proposal 152.
-
 AEAD Encryption of Hop-to-Hop Messages
 --------------------------------------
 
@@ -76,9 +73,9 @@ Iterative decryption can only be achieved, in the way it's used now, using ChaCh
 +----+----+----+----+----+----+----+----+
   |    Tunnel ID      |   tunnelNonce     |
   +----+----+----+----+----+----+----+----+
-  | tunnelNonce cont. |    obfsNonce      |
+  | tunnelNonce cont. |    randNonce      |
   +----+----+----+----+----+----+----+----+
-  |  obfsNonce cont.  |                   |
+  |  randNonce cont.  |                   |
   +----+----+----+----+                   +
   |                                       |
   +           Encrypted Data              +
@@ -86,7 +83,7 @@ Iterative decryption can only be achieved, in the way it's used now, using ChaCh
   |                                       |
   +                   +----+----+----+----+
   |                   |    Poly1305 MAC   |
-  +----+----+----+----+                   +  
+  +----+----+----+----+                   +
   |                                       |
   +                   +----+----+----+----+
   |                   |
@@ -100,7 +97,7 @@ Iterative decryption can only be achieved, in the way it's used now, using ChaCh
          8 bytes
          the tunnel layer nonce
 
-  obfsNonce ::
+  randNonce ::
          8 bytes
          the tunnel layer nonce encryption nonce
 
@@ -122,23 +119,35 @@ All inner hop participants will thus have 64 additional bytes of key material in
 The Outbound Endpoint and Inbound Gateway will only require an additional 32 bytes of keydata,
 since they do not tunnel layer encrypt messages between each other.
 
-The Outbound Gateway generates its ``outAEAD`` key, which is the same as the first
-outbound hop's ``inAEAD`` key.
+The Outbound Gateway generates its ``sendKey``, which is the same as the first outbound hop's ``receiveKey``.
 
-The Inbound Endpoint generates its ``inAEAD`` key, which is the same as the final
-inbound hop's ``outAEAD`` key.
+The Inbound Endpoint generates its ``receiveKey``, which is the same as the final inbound hop's ``sendKey``.
 
-Inner hops will receive and ``inAEADKey`` and ``outAEADKey`` which will be used to AEAD decrypt
+Inner hops will receive and ``receiveKey`` and ``sendKey`` which will be used to AEAD decrypt
 incoming messages and encrypt outgoing messages, respectively.
 
 As an example, in a tunnel with inner hops OBGW, A, B, OBEP:
 
-- A's ``inAEADKey`` is the same as the OBGW's ``outAEADKey``
-- B's ``inAEADKey`` is the same as A's ``outAEADKey``
-- B's ``outAEADKey`` is the same as OBEP's ``inAEADKey``
+- A's ``receiveKey`` is the same as the OBGW's ``sendKey``
+- B's ``receiveKey`` is the same as A's ``sendKey``
+- B's ``sendKey`` is the same as OBEP's ``receiveKey``
 
-Keys are unique to hop pairs, so OBEP's ``inAEADKey`` will be different than A's ``inAEADKey``,
-A's ``outAEADKey`` different than B's ``outAEADKey``, etc.
+Keys are unique to hop pairs, so OBEP's ``receiveKey`` will be different than A's ``receiveKey``,
+A's ``sendKey`` different than B's ``sendKey``, etc.
+
+Tunnel Nonces
+-------------
+
+The tunnel nonces are used to ensure the security of the layer and AEAD encryption.
+
+The ``tunnelNonce`` is used for layer encryption, and inter-hop AEAD encryption.
+
+The ``randNonce`` is used to encrypt the ``tunnelNonce``, cryptographically randomizing the ``tunnelNonce``.
+
+Randomization is needed for both secure use in the cryptosystem, and hiding the ``tunnelNonce`` value
+from non-consecutive, colluding hops.
+
+ChaCha20 and ChaCha20-Poly1305 require unique nonces for each message for the lifetime of the key being used.
 
 Gateway and Tunnel Creator Message Processing
 ---------------------------------------------
@@ -147,8 +156,7 @@ Gateways will fragment and bundle messages in the same way, reserving space afte
 frame for the Poly1305 MAC.
 
 Inner I2NP messages containing AEAD frames (including the MAC) can be split across fragments,
-but any dropped fragments will result in failed AEAD decryption (failed MAC verification) at the
-endpoint.
+but any dropped fragments will result in failed AEAD decryption (failed MAC verification) at the endpoint.
 
 Gateway Preprocessing & Encryption
 ----------------------------------
@@ -158,8 +166,8 @@ When tunnels support ChaCha20 layer encryption, gateways will generate two 64-bi
 Inbound tunnels:
 
 - Encrypt the IV and tunnel message(s) using ChaCha20
-- Use 8-byte ``tunnelNonce`` and ``obfsNonce`` given the lifetime of tunnels
-- Use 8-byte ``obfsNonce`` for ``tunnelNonce`` encryption
+- Use 8-byte ``tunnelNonce`` and ``randNonce`` given the lifetime of tunnels
+- Use 8-byte ``randNonce`` for ``tunnelNonce`` encryption
 - Destroy tunnel before 2^(64 - 1) - 1 sets of messages: 2^63 - 1 = 9,223,372,036,854,775,807
 
   - Nonce limit in place to avoid collision of the 64-bit nonces
@@ -181,21 +189,21 @@ The IBGW preprocesses the messages into the appropriately formatted tunnel messa
 
 // IBGW generates random nonces, ensuring no collision in its Bloom filter for each nonce
   tunnelNonce = Random(len = 64-bits)
-  obfsNonce = Random(len = 64-bits)
+  randNonce = Random(len = 64-bits)
   // IBGW ChaCha20 "encrypts" each of the preprocessed tunnel messages with its tunnelNonce and layerKey
   encMsg = ChaCha20(msg = tunnel msg, nonce = tunnelNonce, key = layerKey)
 
-  // ChaCha20-Poly1305 encrypt each message's encrypted data frame with the tunnelNonce and outAEADKey
-  (encMsg, MAC) = ChaCha20-Poly1305-Encrypt(msg = encMsg, nonce = tunnelNonce, key = outAEADKey)
+  // ChaCha20-Poly1305 encrypt each message's encrypted data frame with the tunnelNonce and sendKey
+  (encMsg, MAC) = ChaCha20-Poly1305-Encrypt(msg = encMsg, nonce = tunnelNonce, key = sendKey)
 {% endhighlight %}
 
 Tunnel message format will slightly change, using two 8-byte nonces instead of a 16-byte IV.
-The ``obfsNonce`` used for encrypting the nonce is appended to the 8-byte ``tunnelNonce``,
-and is encrypted by each hop using the encrypted ``tunnelNonce`` and the hop's ``nonceKey``.
+The ``randNonce`` used for encrypting the nonce is appended to the 8-byte ``tunnelNonce``,
+and is encrypted by each hop using the encrypted ``tunnelNonce`` and the hop's ``randKey``.
 
 After the message set has be pre-emptively decrypted for each hop, the Outbound Gateway
 ChaCha20-Poly1305 AEAD encrypts the ciphertext portion of each tunnel message using
-the ``tunnelNonce`` and its ``outAEADKey``.
+the ``tunnelNonce`` and its ``sendKey``.
 
 Outbound tunnels:
 
@@ -211,19 +219,19 @@ Outbound tunnels:
 
 // For each set of messages, generate unique, random nonces
   tunnelNonce = Random(len = 64-bits)
-  obfsNonce = Random(len = 64-bits)
+  randNonce = Random(len = 64-bits)
 
   // For each hop, ChaCha20 the previous tunnelNonce with the current hop's IV key
-  tunnelNonce = ChaCha20(msg = prev. tunnelNonce, nonce = obfsNonce, key = hop's nonceKey)
+  tunnelNonce = ChaCha20(msg = prev. tunnelNonce, nonce = randNonce, key = hop's randKey)
 
   // For each hop, ChaCha20 "decrypt" the tunnel message with the current hop's tunnelNonce and layerKey
   decMsg = ChaCha20(msg = tunnel msg(s), nonce = tunnelNonce, key = hop's layerKey)
 
-  // For each hop, ChaCha20 "decrypt" the obfsNonce with the current hop's encrypted tunnelNonce and nonceKey
-  obfsNonce = ChaCha20(msg = obfsNonce, nonce = tunnelNonce, key = hop's nonceKey)
+  // For each hop, ChaCha20 "decrypt" the randNonce with the current hop's encrypted tunnelNonce and randKey
+  randNonce = ChaCha20(msg = randNonce, nonce = tunnelNonce, key = hop's randKey)
 
-  // After hop processing, ChaCha20-Poly1305 encrypt each tunnel message's "decrypted" data frame with the first hop's encrypted tunnelNonce and inAEADKey
-  (encMsg, MAC) = ChaCha20-Poly1305-Encrypt(msg = decMsg, nonce = first hop's encrypted tunnelNonce, key = first hop's inAEADKey / GW outAEADKey)
+  // After hop processing, ChaCha20-Poly1305 encrypt each tunnel message's "decrypted" data frame with the first hop's encrypted tunnelNonce and receiveKey
+  (encMsg, MAC) = ChaCha20-Poly1305-Encrypt(msg = decMsg, nonce = first hop's encrypted tunnelNonce, key = first hop's receiveKey / GW sendKey)
 {% endhighlight %}
 
 Participant Processing
@@ -237,17 +245,17 @@ by non-consecutive, colluding hops.
 Hops will encrypt the received nonce to prevent confirmation attacks between prior and later hops,
 i.e. colluding, non-consecutive hops being able to tell they belong to the same tunnel.
 
-To validate received ``tunnelNonce`` and ``obfsNonce``, participants check each nonce individually
+To validate received ``tunnelNonce`` and ``randNonce``, participants check each nonce individually
 against their Bloom filter for duplicates.
 
 After validation, the participant:
 
-- ChaCha20-Poly1305 decrypts each tunnel message's AEAD ciphertext with the received ``tunnelNonce`` and its ``inAEADKey``
-- ChaCha20 encrypts the ``tunnelNonce`` with its ``nonceKey`` and received ``obfsNonce``
+- ChaCha20-Poly1305 decrypts each tunnel message's AEAD ciphertext with the received ``tunnelNonce`` and its ``receiveKey``
+- ChaCha20 encrypts the ``tunnelNonce`` with its ``randKey`` and received ``randNonce``
 - ChaCha20 encrypts the each tunnel message's encrypted data frame with the encrypted ``tunnelNonce`` and its ``layerKey``
-- ChaCha20-Poly1305 encrypts each tunnel message's encrypted data frame the encrypted ``tunnelNonce`` and its ``outAEADKey`` 
-- ChaCha20 encrypts the ``obfsNonce`` with its ``nonceKey`` and encrypted ``tunnelNonce``
-- Sends the tuple {``nextTunnelId``, encrypted (``tunnelNonce`` || ``obfsNonce``), AEAD ciphertext || MAC} to the next hop.
+- ChaCha20-Poly1305 encrypts each tunnel message's encrypted data frame the encrypted ``tunnelNonce`` and its ``sendKey``
+- ChaCha20 encrypts the ``randNonce`` with its ``randKey`` and encrypted ``tunnelNonce``
+- Sends the tuple {``nextTunnelId``, encrypted (``tunnelNonce`` || ``randNonce``), AEAD ciphertext || MAC} to the next hop.
 
 .. raw:: html
 
@@ -255,21 +263,21 @@ After validation, the participant:
 
 // For verification, tunnel hops should check Bloom filter for each received nonce's uniqueness
   // After verification, unwrap the AEAD frame(s) byChaCha20-Poly1305 decrypt each tunnel message's encrypted frame
-  // with the received tunnelNonce and inAEADKey 
-  encTunMsg = ChaCha20-Poly1305-Decrypt(msg = received encMsg \|\| MAC, nonce = received tunnelNonce, key = inAEADKey)
+  // with the received tunnelNonce and receiveKey
+  encTunMsg = ChaCha20-Poly1305-Decrypt(msg = received encMsg || MAC, nonce = received tunnelNonce, key = receiveKey)
 
-  // ChaCha20 encrypt the tunnelNonce with the obfsNonce and hop's nonceKey
-  tunnelNonce = ChaCha20(msg = received tunnelNonce, nonce = received obfsNonce, key = nonceKey)
+  // ChaCha20 encrypt the tunnelNonce with the randNonce and hop's randKey
+  tunnelNonce = ChaCha20(msg = received tunnelNonce, nonce = received randNonce, key = randKey)
 
   // ChaCha20 encrypt each tunnel message's encrypted data frame with the encrypted tunnelNonce and hop's layerKey
   encMsg = ChaCha20(msg = encTunMsg, nonce = tunnelNonce, key = layerKey)
 
   // For AEAD protection, also ChaCha20-Poly1305 encrypt each message's encrypted data frame
-  // with the encrypted tunnelNonce and the hop's outAEADKey
-  (encMsg, MAC) = ChaCha20-Poly1305-Encrypt(msg = encMsg, nonce = tunnelNonce, key = outAEADKey)
+  // with the encrypted tunnelNonce and the hop's sendKey
+  (encMsg, MAC) = ChaCha20-Poly1305-Encrypt(msg = encMsg, nonce = tunnelNonce, key = sendKey)
 
-  // ChaCha20 encrypt the received obfsNonce with the encrypted tunnelNonce and hop's nonceKey
-  obfsNonce = ChaCha20(msg = obfsNonce, nonce = tunnelNonce, key = nonceKey)
+  // ChaCha20 encrypt the received randNonce with the encrypted tunnelNonce and hop's randKey
+  randNonce = ChaCha20(msg = randNonce, nonce = tunnelNonce, key = randKey)
 {% endhighlight %}
 
 Inbound Endpoint Processing
@@ -277,11 +285,11 @@ Inbound Endpoint Processing
 
 For ChaCha20 tunnels, the following scheme will be used to decrypt each tunnel message:
 
-- Validate the received ``tunnelNonce`` and ``obfsNonce`` independently against its Bloom filter
-- ChaCha20-Poly1305 decrypt the encrypted data frame using the received ``tunnelNonce`` and ``inAEADKey``
+- Validate the received ``tunnelNonce`` and ``randNonce`` independently against its Bloom filter
+- ChaCha20-Poly1305 decrypt the encrypted data frame using the received ``tunnelNonce`` and ``receiveKey``
 - ChaCha20 decrypt the encrypted data frame using the received ``tunnelNonce`` & the hop's ``layerKey``
-- ChaCha20 decrypt the ``obfsNonce`` using the hop's ``nonceKey`` and received ``tunnelNonce`` to get the preceding ``obfsNonce``
-- ChaCha20 decrypt the received ``tunnelNonce`` using the hop's ``nonceKey`` and decrypted ``obfsNonce`` to get the preceding ``tunnelNonce``
+- ChaCha20 decrypt the ``randNonce`` using the hop's ``randKey`` and received ``tunnelNonce`` to get the preceding ``randNonce``
+- ChaCha20 decrypt the received ``tunnelNonce`` using the hop's ``randKey`` and decrypted ``randNonce`` to get the preceding ``tunnelNonce``
 - ChaCha20 decrypt the encrypted data using the decrypted ``tunnelNonce`` & the preceding hop's ``layerKey``
 - Repeat the steps for nonce and layer decryption for each hop in the tunnel, back to the IBGW
 - The AEAD frame decryption is only needed in the first round
@@ -291,17 +299,17 @@ For ChaCha20 tunnels, the following scheme will be used to decrypt each tunnel m
   {% highlight lang='dataspec' %}
 
 // For the first round, ChaCha20-Poly1305 decrypt each message's encrypted data frame + MAC
-  // using the received tunnelNonce and inAEADKey
-  msg = encTunMsg \|\| MAC
+  // using the received tunnelNonce and receiveKey
+  msg = encTunMsg || MAC
   tunnelNonce = received tunnelNonce
-  encTunMsg = ChaCha20-Poly1305-Decrypt(msg, nonce = tunnelNonce, key = inAEADKey)
+  encTunMsg = ChaCha20-Poly1305-Decrypt(msg, nonce = tunnelNonce, key = receiveKey)
 
   // Repeat for each hop in the tunnel back to the IBGW
   // For every round, ChaCha20 decrypt each hop's layer encryption on each message's encrypted data frame
   // Replace the received tunnelNonce w/ the prior round's decrypted tunnelNonce for each hop
   decMsg = ChaCha20(msg = encTunMsg, nonce = tunnelNonce, key = layerKey)
-  obfsNonce = ChaCha20(msg = obfsNonce, nonce = tunnelNonce, key = nonceKey)
-  tunnelNonce = ChaCha20(msg = tunnelNonce, nonce = obfsNonce, key = nonceKey)
+  randNonce = ChaCha20(msg = randNonce, nonce = tunnelNonce, key = randKey)
+  tunnelNonce = ChaCha20(msg = tunnelNonce, nonce = randNonce, key = randKey)
 {% endhighlight %}
 
 Security Analysis for ChaCha20+ChaCha20-Poly1305 Tunnel Layer Encryption
@@ -314,12 +322,12 @@ for the life of the key being used.
 
 Failing to use unique nonces with the same key on different messages breaks ChaCha20 and ChaCha20-Poly1305.
 
-Using an appended ``obfsNonce`` allows the IBEP to decrypt the ``tunnelNonce`` for each hop's layer encryption,
+Using an appended ``randNonce`` allows the IBEP to decrypt the ``tunnelNonce`` for each hop's layer encryption,
 recovering the previous nonce.
 
-The ``obfsNonce`` alongside the ``tunnelNonce`` doesn't reveal any new information to tunnel hops,
-since the ``obfsNonce`` is encrypted using the encrypted ``tunnelNonce``. This also allows the IBEP to recover
-the previous ``obfsNonce`` in a similar way to ``tunnelNonce`` recovery.
+The ``randNonce`` alongside the ``tunnelNonce`` doesn't reveal any new information to tunnel hops,
+since the ``randNonce`` is encrypted using the encrypted ``tunnelNonce``. This also allows the IBEP to recover
+the previous ``randNonce`` in a similar way to ``tunnelNonce`` recovery.
 
 The biggest security advantage is that there are no confirmation or oracle attacks against ChaCha20,
 and using ChaCha20-Poly1305 between hops adds AEAD protection against ciphertext manipulation from
