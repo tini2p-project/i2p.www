@@ -122,8 +122,8 @@ Reply Record Spec Unencrypted (ECIES)
 
   {% highlight lang='dataspec' %}
 
-bytes      0: Reply byte
-  bytes  1-511: Tunnel Build Options / Random padding
+bytes  0-510: Tunnel Build Options / Random padding
+  bytes    511: Reply byte
 
 {% endhighlight %}
 
